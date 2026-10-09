@@ -1,0 +1,64 @@
+<script>
+// Page chrome for the article. Quarto places include-before-body and the title
+// block inside the content column; move them so the site bar and the hero span
+// the full width above the sidebar and the article, like the real site.
+(() => {
+  const content = document.getElementById("quarto-content");
+  const bar = document.querySelector(".site-bar");
+  if (bar) document.body.prepend(bar);
+
+  const title = document.getElementById("title-block-header");
+  if (!content || !title) return;
+  const hero = document.createElement("header");
+  hero.className = "hero";
+  const inner = document.createElement("div");
+  inner.className = "hero-inner";
+  const text = document.createElement("div");
+  text.className = "hero-text";
+  text.append(title);
+  const meta = document.querySelector(".data-note");
+  if (meta) text.append(meta);
+  inner.append(text);
+  hero.append(inner);
+  content.before(hero);
+})();
+
+// Collapsible sidebar: each section's subsections fold under a chevron. They
+// start collapsed; the section being read opens automatically as you scroll.
+(() => {
+  const toc = document.getElementById("TOC");
+  if (!toc) return;
+  const items = [...toc.querySelectorAll(":scope > ul > li")].filter((li) => li.querySelector(":scope > ul"));
+  for (const li of items) {
+    li.classList.add("has-sub", "collapsed");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toc-toggle";
+    button.setAttribute("aria-label", "Show or hide subsections");
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => {
+      const collapsed = li.classList.toggle("collapsed");
+      button.setAttribute("aria-expanded", String(!collapsed));
+    });
+    li.prepend(button);
+  }
+  // Open the section whose heading was most recently scrolled past.
+  const tracked = items
+    .map((li) => ({ li, section: document.getElementById(li.querySelector(":scope > a").hash.slice(1)) }))
+    .filter((t) => t.section);
+  let lastOpened = null;
+  const openCurrent = () => {
+    let current = null;
+    for (const t of tracked) {
+      if (t.section.getBoundingClientRect().top < 160) current = t;
+    }
+    if (!current || current === lastOpened) return;
+    lastOpened = current;
+    current.li.classList.remove("collapsed");
+    current.li.querySelector(":scope > .toc-toggle").setAttribute("aria-expanded", "true");
+  };
+  document.addEventListener("scroll", openCurrent, { passive: true });
+  window.addEventListener("hashchange", openCurrent);
+  openCurrent();
+})();
+</script>

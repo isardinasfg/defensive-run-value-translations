@@ -1,0 +1,14 @@
+# Allow-list: only the article and the SQL it runs are tracked.
+# Data snapshots, caches, notebooks and the venv stay local.
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/article/
+!/queries/
+
+article/data/
+article/__pycache__/
+article/defensive_dives.md
+article/defensive_dives_files/
+*.parquet

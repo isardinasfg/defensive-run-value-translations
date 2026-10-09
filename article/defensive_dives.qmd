@@ -1,0 +1,1307 @@
+---
+title: "Defensive Run Value Level Translations"
+subtitle: "What minor league defensive numbers tell us about the next level."
+author: "Inaki Sardina"
+date: today
+date-format: long
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+  daemon: false  # the persistent kernel's socket resets on Windows; start fresh each render
+format:
+  html:
+    embed-resources: true
+    theme: default
+    css: styles.css
+    include-before-body: header.html
+    include-after-body: page-chrome.html
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-expand: true
+    toc-title: "On this page"
+    fig-align: center
+    fig-dpi: 150
+    format-links: false
+  gfm:
+    output-file: defensive_dives.md
+---
+
+```{python}
+#| tags: [parameters]
+# Render with `-P refresh:true` to re-pull every query from BigQuery;
+# otherwise the parquet snapshots in data/ are reused.
+refresh = False
+```
+
+```{python}
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+# Rendering runs from article/, but running cells in the editor starts wherever
+# the kernel does (usually the project root), so find article/ either way.
+ARTICLE_DIR = next(d for d in (Path.cwd(), Path.cwd() / "article", Path.cwd().parent / "article")
+                   if (d / "article_lib.py").exists())
+sys.path.insert(0, str(ARTICLE_DIR))
+
+import article_lib as L
+from article_lib import LEVEL_LABEL_ORDER, pct, num
+
+L.apply_style()
+
+# --- Position players -------------------------------------------------------------
+dfc = L.load_fielding_plays(refresh)
+f_agg, f_q = L.qualify_fielding(dfc)
+f_dist = L.level_distribution(f_q)
+f_trans = L.adjacent_transitions(f_q, ["player_code", "position"])
+f_models = L.transition_models(f_trans, min_n=30)
+f_pers = L.persistence_table(f_trans)
+f_year, f_cohort, f_minors = L.mlb_cohort(
+    f_q, L.first_mlb_appearance(dfc, "game_date"), percentile_within="position")
+f_age = L.add_age(f_q, L.load_birth_dates(refresh))
+qp = f_q[f_q["position"] != "catcher"].copy()
+pairs = L.position_pairs(qp)
+moves = L.position_moves(qp)
+f_age_change, f_age_pairs, f_age_effects = L.aging_curve(f_age)
+f_age_change_z, _, _ = L.aging_curve(f_age, n_boot=0, measure="z")
+f_age_profile = L.age_profile(f_age)
+
+# --- Catchers (framing) ------------------------------------------------------
+c_agg, c_q = L.qualify_framing(L.load_framing_level_agg(refresh))
+c_dist = L.level_distribution(c_q)
+c_trans = L.adjacent_transitions(c_q, ["player_code"])
+c_models = L.transition_models(c_trans, min_n=20)
+c_pers = L.persistence_table(c_trans)
+c_year, c_cohort, c_minors = L.mlb_cohort(c_q, L.first_mlb_appearance(c_agg, "first_game"))
+
+# --- Catchers (throwing) ---------------------------------------------------
+throws = L.load_catcher_throwing(refresh)
+t_all, t_q = L.qualify_throwing(throws)
+throw_first_year, throw_last_year = int(throws["year"].min()), int(throws["year"].max())
+split = L.catcher_value_split(c_q, t_all)
+split_by = split.set_index("level_label")
+mlb_split = split_by.loc["MLB"]
+share_lo, share_hi = pct(split["throwing_share"].min()), pct(split["throwing_share"].max())
+share_avg = pct((split["throwing_share"] * split["catcher_seasons"]).sum() / split["catcher_seasons"].sum())
+corr_lo, corr_hi = num(split["corr"].min()), num(split["corr"].max())
+steal_fx, steal_n = L.steal_model(throws)
+cs_grid, grid_n = L.caught_stealing_grid(throws)
+cs_arm, arm_n = L.caught_stealing_by_arm(throws)
+grid_best = cs_grid.iloc[0]["caught_rate"]    # fastest pop, quickest delivery
+grid_worst = cs_grid.iloc[-1]["caught_rate"]  # slowest pop, slowest delivery
+delivery = L.throw_runs_by_delivery(throws)
+delivery_quick, delivery_slow = delivery["runs_per_attempt"].iloc[0], delivery["runs_per_attempt"].iloc[-1]
+t_trans = L.adjacent_transitions(t_q, ["player_code"])
+t_models = L.transition_models(t_trans, min_n=20)
+t_keep_pct = pct(t_models["slope"].mean())
+t_pers = L.persistence_table(t_trans)
+cs_rate_all = throws["caught"].mean()
+pop_levels = L.pop_time_by_level(throws)
+pop_carry_slope, pop_carry_r, pop_carry_n = L.pop_time_carry(throws)
+pop_repeat_r, pop_repeat_n = L.pop_time_repeat(throws)
+frame_throw_ratio = (split["framing_sd"] / split["throwing_sd"]).mean()
+pop_low, pop_mlb = pop_levels.iloc[0], pop_levels.loc[L.LEVEL_NUM["mlb"]]
+pop_low_label = L.LEVEL_LABEL_ORDER[int(pop_levels.index[0]) - 1]
+pop_years = sorted(int(y) for y in throws.loc[throws["catcher_pop_time"].notna(), "year"].unique())
+pop_year_text = str(pop_years[0]) if len(pop_years) == 1 else f"{pop_years[0]}–{pop_years[-1]}"
+
+# --- Who moves up: seasons old enough that players had 2+ more seasons to move
+PROMOTION_WINDOW = 2
+promo_last_start = int(dfc["year"].max()) - PROMOTION_WINDOW
+f_promo_rows, f_promo = L.promotion_outcomes(f_q, f_agg, promo_last_start)
+c_promo_rows, c_promo = L.promotion_outcomes(c_q, c_agg, promo_last_start)
+
+
+def promo_summary(summary):
+    p = summary.set_index("starting_group")
+    return (pct(p.loc["Bottom 20%", "moved_up"]), pct(p.loc["Top 20%", "moved_up"]),
+            pct(p.loc["Bottom 20%", "reached_mlb"]), pct(p.loc["Top 20%", "reached_mlb"]))
+
+
+f_promo_bottom, f_promo_top, f_mlb_bottom, f_mlb_top = promo_summary(f_promo)
+c_promo_bottom, c_promo_top, c_mlb_bottom, c_mlb_top = promo_summary(c_promo)
+_, t_promo = L.promotion_outcomes(t_q, t_all, promo_last_start)
+t_promo_bottom, t_promo_top, _, _ = promo_summary(t_promo)
+
+# --- Level-to-level translation (each player's combined record at each level)
+TRANSLATION_MIN_PLAYERS = {"fielders": 30, "catchers": 20}
+f_records = L.level_records(f_agg, ["player_code", "position"], L.FIELDING_MIN_OPPORTUNITIES)
+f_tr = L.translation_table(f_records, ["player_code", "position"], TRANSLATION_MIN_PLAYERS["fielders"])
+f_tr_by_pos = {
+    L.POSITION_LABELS[pos]: L.translation_table(f_records[f_records["position"] == pos], ["player_code", "position"],
+                                                TRANSLATION_MIN_PLAYERS["fielders"])
+    for pos in L.SPECTRUM_ORDER
+}
+c_tr = L.translation_table(
+    L.level_records(c_agg, ["player_code"], L.FRAMING_MIN_OPPORTUNITIES),
+    ["player_code"], TRANSLATION_MIN_PLAYERS["catchers"])
+t_tr = L.translation_table(
+    L.level_records(t_all, ["player_code"], L.THROWING_MIN_ATTEMPTS),
+    ["player_code"], TRANSLATION_MIN_PLAYERS["catchers"])
+swaps = L.swap_table(qp, TRANSLATION_MIN_PLAYERS["fielders"])
+up_down = L.up_down_comparison([("Position players", f_q, ["player_code", "position"]),
+                                ("Catcher framing", c_q, ["player_code"]),
+                                ("Catcher throwing", t_q, ["player_code"])])
+
+# --- Numbers quoted in the text ------------------------------------------
+last_game = dfc["game_date"].max()
+data_through = f"{last_game:%B} {last_game.day}, {last_game.year}"
+today = pd.Timestamp.today()
+published = f"{today:%B} {today.day}, {today.year}"
+data_pulled = L.snapshot_date("fielding_plays").strftime("%Y-%m-%d")
+first_season, last_season = int(dfc["year"].min()), int(dfc["year"].max())
+n_plays = f"{len(dfc):,}"
+n_players = f"{dfc['player_code'].nunique():,}"
+n_f_rows = f"{len(f_q):,}"
+n_f_players = f"{f_q['player_code'].nunique():,}"
+n_c_rows = f"{len(c_q):,}"
+n_c_catchers = f"{c_q['player_code'].nunique():,}"
+
+
+def spread_summary(dist):
+    low, mlb = dist.iloc[0], dist[dist["level"] == "mlb"].iloc[0]
+    return (low["level_label"], num(low["spread_80"]), num(mlb["spread_80"]),
+            f"{low['spread_80'] / mlb['spread_80']:.1f}", f"{low['median_opportunities']:,.0f}",
+            f"{mlb['median_opportunities']:,.0f}")
+
+
+(f_low_label, f_low_spread, f_mlb_spread, f_spread_ratio,
+ f_low_opps, f_mlb_opps) = spread_summary(f_dist)
+(c_low_label, c_low_spread, c_mlb_spread, c_spread_ratio,
+ c_low_opps, c_mlb_opps) = spread_summary(c_dist)
+
+
+def slope_summary(models):
+    return (num(models["slope"].min()), num(models["slope"].max()),
+            models["slope"].mean(), models["z_slope"].mean())
+
+
+f_slope_lo, f_slope_hi, f_slope_avg, f_z_avg = slope_summary(f_models)
+c_slope_lo, c_slope_hi, c_slope_avg, c_z_avg = slope_summary(c_models)
+f_keep_pct, c_keep_pct = pct(f_slope_avg), pct(c_slope_avg)
+f_keep_of_10, c_keep_of_10 = f"{f_slope_avg * 10:.0f}", f"{c_slope_avg * 10:.0f}"
+
+
+def persistence_summary(pers):
+    p = pers.set_index("starting_group")
+    return (pct(p.loc["Top 20%", "finished_above_average"]), pct(p.loc["Bottom 20%", "finished_above_average"]),
+            pct(p.loc["Top 20%", "finished_in_top_20"]), pct(p.loc["Bottom 20%", "finished_in_top_20"]))
+
+
+f_top_above, f_bottom_above, f_top_top, f_bottom_top = persistence_summary(f_pers)
+c_top_above, c_bottom_above, c_top_top, c_bottom_top = persistence_summary(c_pers)
+t_top_above, t_bottom_above, _, _ = persistence_summary(t_pers)
+
+
+def compare(a, b, tol=0.05, more="more than", less="less than", same="about the same as"):
+    return more if a > b + tol else less if a < b - tol else same
+
+
+def top_bottom_gap(pers):
+    p = pers.set_index("starting_group")["finished_above_average"]
+    return p["Top 20%"] - p["Bottom 20%"]
+
+
+t_slope_avg = t_models["slope"].mean()
+throw_vs_frame_carry = compare(t_slope_avg, c_slope_avg)
+throw_vs_frame_rank = compare(top_bottom_gap(t_pers), top_bottom_gap(c_pers),
+                              more="better than", less="less well than", same="about as well as")
+
+
+def cohort_summary(cohort):
+    above = cohort[cohort["current_mlb_percentile"] > 0.5]
+    share = (above["average_minor_percentile"] > 0.5).mean()
+    r = cohort["average_minor_percentile"].corr(cohort["current_mlb_percentile"])
+    return len(cohort), len(above), pct(share), num(r)
+
+
+f_cohort_n, f_above_n, f_above_share, f_cohort_r = cohort_summary(f_cohort)
+c_cohort_n, c_above_n, c_above_share, c_cohort_r = cohort_summary(c_cohort)
+```
+
+::: {.data-note}
+[By Inaki Sardina]{.meta-item} [`{python} published`]{.meta-item}
+[SFG defensive run value · `{python} first_season`–`{python} last_season`]{.meta-item}
+[Games through `{python} data_through`]{.meta-item}
+:::
+
+## Project Summary
+
+::: {.lead}
+A player's defensive numbers shrink with every promotion, but where they rank
+among their peers holds up. Good defenders in the minors usually become good
+defenders in the majors.
+:::
+
+::: {.key-stats}
+- **`{python} f"{f_slope_avg:.2f}"`** runs: a one-run advantage in FRV/100 at one
+  level corresponds to approximately a `{python} f"{f_slope_avg:.2f}"`-run
+  advantage at the next level, on average (`{python} f"{c_slope_avg:.2f}"` for
+  catcher framing).
+- **`{python} f_top_above`** of top-20% position players stay above average after moving
+  up (`{python} c_top_above` of top-20% framers).
+- **`{python} f_above_share`** of today's above-average MLB position players were above
+  average in the minors (`{python} c_above_share` of framers).
+- **`{python} share_avg`** of the difference in catchers' season value comes
+  from throwing, with framing the rest.
+:::
+
+## Introduction
+
+When a player moves up a level, how much of their defensive value comes with them?
+This report answers that using SFG
+defensive run value from rookie ball through MLB.
+
+**Project Questions:**
+
+1. How do defensive numbers change as players move up the ladder?
+2. How much of a player's defense at one level shows up at the next?
+3. How do catching skills translate across levels?
+
+**How to read the numbers:**
+
+- **Runs saved per 100 chances** measures a player's defense. 0 is average,
+  positive is better than average, negative is worse. For position players a chance is
+  a ball in play they could make a play on; for catchers chances are called pitches and
+  basestealing throwing opportunities.
+
+- **Rank among peers** compares a player only with others at the same level,
+  in the same season, at the same position. A player at
+  80% ranks ahead of 80% of their peers.
+
+## Position Players
+
+### Rookie-ball numbers swing much more
+
+```{python}
+L.plot_level_spread(f_q, "The range of fielding numbers narrows at every level",
+                    "Runs saved per 100 chances")
+```
+
+Rookie-ball fielding numbers are spread much wider than MLB numbers. The range
+covering most players (the middle 80%) is `{python} f_spread_ratio` times as
+wide in `{python} f_low_label` as it is in MLB. Players get fewer chances in
+rookie ball, talent is more uneven and tracking systems are less reliable, so big numbers in either direction
+are more common and "mean" less.
+
+### Only part of a player's edge moves up with them
+
+```{python}
+L.plot_carryover(f_models, f"Position players keep about {f_keep_pct} of their edge at each step")
+```
+
+When a position player moves up a level, only about `{python} f_keep_pct` of their edge
+over an average player shows up at the next level. For every 10 runs above
+average at one level, expect roughly `{python} f_keep_of_10` above average at
+the next. The pattern holds at every step, from Rookie Ball to Triple-A to MLB.
+
+### Where a player ranks carries forward
+
+```{python}
+L.plot_persistence(f_pers, "Higher-ranked position players stay above average more often",
+                   "position players")
+```
+
+**How to read this chart:** position players are sorted into five groups by where they
+ranked among their peers before a promotion, from the bottom 20% on the left to
+the top 20% on the right. Each bar shows how many in that group were **above
+average at the next level**. If rank meant nothing, every bar would sit near the
+50% line, like a coin flip.
+
+Instead, the bars climb from left to right. Position players in the top 20% are above
+average after moving up `{python} f_top_above` of the time, while position players in
+the bottom 20% get there only `{python} f_bottom_above` of the time. Even though
+the raw numbers shrink, a player's rank holds up.
+
+### Do poor position players still move up?
+
+```{python}
+L.plot_promotion(f_promo, "moved_up", "Poor position players move up almost as often as good ones",
+                 "Share who later reached a higher level", "position players")
+L.plot_promotion(f_promo, "reached_mlb", "Better position players reach MLB a little more often",
+                 "Share who later reached MLB", "position players")
+```
+
+Yes, most of them do. Looking at minor-league seasons through
+`{python} promo_last_start` (so every player has had at least two more seasons to
+move up), position players who ranked in the bottom 20% at their level still moved up at
+least one level `{python} f_promo_bottom` of the time, compared with
+`{python} f_promo_top` for the top 20%. `{python} f_mlb_bottom` of bottom-20%
+position players eventually reached MLB, compared with `{python} f_mlb_top` of the top
+20%.
+
+Defensive performance is associated with promotion rates, but it is not the sole determining factor. 
+Players with below-average defense frequently advance to higher levels, where their defensive struggles can persist.
+
+### Today's good MLB position players were good in the minors
+
+```{python}
+L.plot_cohort_scatter(f_cohort, f_year, "Minor-league rank lines up with MLB rank", "position player")
+```
+
+Looking back at `{python} f_year` MLB position players who came up through the minors
+recently, `{python} f_above_share` of the above-average ones were also above
+average in the minors. A good minor-league track record doesn't guarantee a
+good MLB defender, but it improves the odds.
+
+The six best and six worst of those MLB position players this season, and how they
+ranked at each stop on the way up:
+
+```{python}
+L.plot_journeys(f_cohort, f_minors, f_year, "Position player paths to MLB")
+```
+
+### Age: position players keep pace until their late 20s
+
+```{python}
+prof = f_age_profile.set_index("age")
+# Ages where most seasons are in rookie ball swing the most; leave them out
+# when describing the low point and the peak.
+rookie_share = (f_age.assign(age_int=np.floor(f_age["age"]).astype(int))
+                .groupby("age_int")["level_num"].apply(lambda s: (s <= 2).mean()))
+steady = prof[rookie_share.reindex(prof.index) < 0.5]
+prof_peak_age = int(steady["rate"].idxmax())
+prof_peak = f"{steady['rate'].max():+.2f}"
+prof_low_age = int(steady.loc[:prof_peak_age, "rate"].idxmin())
+prof_low = f"{steady.loc[prof_low_age, 'rate']:+.2f}"
+rookie_ages = [int(a) for a in prof.index if a < steady.index.min()]
+
+
+def pooled(rows):
+    return f"{(rows['rate'] * rows['rows']).sum() / rows['rows'].sum():+.2f}"
+
+
+late_avg = pooled(prof.loc[prof_peak_age + 1:])
+below_zero = prof.index[prof["rate"] < 0]
+first_below = int(below_zero.min()) if len(below_zero) else None
+L.plot_age_profile(f_age_profile, f"Fielding runs peak at {prof_peak_age}, then fall off")
+```
+
+**Runs saved at each age.** First, the plain numbers: the average runs saved per
+100 chances for position players at each age, across all levels.
+
+- **Building up:** after a low point at `{python} prof_low_age`
+  (`{python} prof_low` runs per 100 chances), fielding runs climb to a peak of
+  `{python} prof_peak` at age `{python} prof_peak_age`.
+- **Falling off:** from `{python} prof_peak_age + 1` on, the average drops to
+  `{python} late_avg`, and by `{python} first_below` the typical position player is
+  below zero.
+- **The youngest ages** (`{python} rookie_ages[0]`–`{python} rookie_ages[-1]`)
+  look strong too, but most of those seasons are in rookie ball, where numbers
+  swing the most.
+
+Players of the same age are spread across different levels, so this chart mixes
+getting older with who is playing where. The next chart handles that by
+comparing each player only with peers at their own level.
+
+```{python}
+AGE_SPLIT = 27  # first age of the "older" group quoted in the text
+
+
+def avg_change(rows):
+    return (rows["change"] * rows["pairs"]).sum() / rows["pairs"].sum() * 100
+
+
+young = f_age_change[f_age_change["age"] < AGE_SPLIT]
+older = f_age_change[f_age_change["age"] >= AGE_SPLIT]
+young_change, older_change = f"{avg_change(young):+.1f}", f"{avg_change(older):+.1f}"
+age_first, age_last = int(f_age_change["age"].min()), int(f_age_change["age"].max())
+L.plot_aging_curve(f_age_change, "Position players hold their rank through their mid-20s, then start to slip")
+```
+
+**Keeping pace with peers.** This chart asks how a position player's **rank among their
+peers** changes from one season to the next as they get older. Because rank is measured against
+players at the same level, players can be followed even when they move up.
+Each bar is the typical change for an average position player at that age. Above zero
+means they gained ground on their peers over the next season; below zero means
+they lost ground.
+
+- **Up to `{python} AGE_SPLIT - 1`:** position players hold or slightly gain ground,
+  about `{python} young_change` rank points a season on average.
+- **From `{python} AGE_SPLIT`:** they tend to slip, about
+  `{python} older_change` points a season, with the biggest drops in the early
+  30s.
+
+The lines on each bar show how uncertain that single age is, and most of them
+cross zero. The pattern across ages is more reliable than any one bar.
+
+### Position: players grade worse at harder spots
+
+```{python}
+n_pairs = f"{len(pairs):,}"
+harder_worse = pct((pairs["gap"] < 0).mean())
+pair_summary = (pairs.groupby(["harder_position", "easier_position"])["gap"]
+                .agg(["size", "mean"]).query("size >= 50").sort_values("mean"))
+big_pair = pair_summary.index[0]
+big_pair_gap = f"{abs(pair_summary['mean'].iloc[0]) * 100:.0f}"
+
+move_summary = moves.groupby("move_direction").agg(
+    before=("percentile", "mean"), after=("next_pctile", "mean"), n=("percentile", "size"))
+easier, harder = move_summary.loc["Toward an easier position"], move_summary.loc["Toward a harder position"]
+n_moves = f"{len(moves):,}"
+share_easier = pct(easier["n"] / len(moves))
+easier_change = f"{abs(easier['after'] - easier['before']) * 100:.0f}"
+harder_change = f"{abs(harder['after'] - harder['before']) * 100:.0f}"
+
+pos_dist = qp.groupby("position_label")["sfg_frv_per_100"].agg(
+    p10=lambda s: s.quantile(0.10), p90=lambda s: s.quantile(0.90))
+pos_dist["spread_80"] = pos_dist["p90"] - pos_dist["p10"]
+widest_pos, narrowest_pos = pos_dist["spread_80"].idxmax(), pos_dist["spread_80"].idxmin()
+widest_spread, narrowest_spread = num(pos_dist["spread_80"].max()), num(pos_dist["spread_80"].min())
+avg_gap = f"{abs(pairs['gap'].mean()) * 100:.0f}"
+big_pair_n = f"{int(pair_summary['size'].iloc[0]):,}"
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(L.FIG_W, 4.8))
+p01, p99 = qp["sfg_frv_per_100"].quantile([0.01, 0.99])
+L.styled_boxplot(ax, [qp.loc[qp["position_label"] == p, "sfg_frv_per_100"].clip(p01, p99)
+                      for p in L.POSITION_LABEL_ORDER],
+                 L.POSITION_LABEL_ORDER, [L.ACCENT] * len(L.POSITION_LABEL_ORDER), alpha=0.55)
+ax.axhline(0, color=L.REFERENCE, linewidth=1, zorder=0)
+L.style_ax(ax, title="Fielding numbers by position",
+           subtitle="All levels combined, hardest position on the left",
+           ylabel="Runs saved per 100 chances")
+plt.tight_layout()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(L.FIG_W, 4.6))
+order = ["Toward a harder position", "Toward an easier position"]
+x = np.arange(len(order))
+w = 0.32
+ax.bar(x - w / 2, move_summary.loc[order, "before"], w, color=L.INK, label="Season before the move")
+ax.bar(x + w / 2, move_summary.loc[order, "after"], w, color=L.ACCENT, edgecolor=L.INK, linewidth=0.7,
+       label="Season after the move")
+ax.axhline(0.5, color=L.REFERENCE, linewidth=1, linestyle="--")
+ax.set_xticks(x)
+ax.set_xticklabels(["Moved to a\nharder position", "Moved to an\neasier position"])
+ax.set_ylim(0.40, 0.62)
+ax.yaxis.set_major_locator(mticker.MultipleLocator(0.05))
+ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
+L.style_ax(ax, title="Changing positions", subtitle="Average rank the season before and after",
+           ylabel="Average rank among peers")
+ax.legend(loc="upper left", frameon=False, fontsize=8.5, ncol=2)
+plt.tight_layout()
+plt.show()
+```
+
+**Same player, two positions.** When a player played two positions in the same
+season and at the same level, they graded worse at the harder position
+`{python} harder_worse` of the time. The biggest gap was between
+`{python} big_pair[0]` and `{python} big_pair[1]`.
+
+**Changing positions.** Players who moved to an easier position ranked about
+`{python} easier_change` points higher the next season. Players who moved to a
+harder position ranked about `{python} harder_change` points lower. 
+
+### Position player takeaways
+
+- Rookie-ball fielding numbers swing widely, so judge players against their
+  peers at that level.
+- Expect about `{python} f_keep_pct` of a position player's edge to carry to the next
+  level.
+- Rank carries forward: top-20% position players usually stay above average after
+  moving up.
+- Poor position players still get promoted most of the time, so their defensive
+  problems move up with them.
+- Position players keep pace with their peers through their mid-20s and start to
+  slip from their late 20s.
+- Position matters: expect a player's grade to drop at a harder position and
+  rise at an easier one.
+
+## Catchers
+
+Catchers generate most of their defensive value differently from other position players, 
+primarily through **framing** and **throwing**. Throwing data covers 2016–2026 from Low-A to MLB.
+
+### Framing matters most, but throwing counts too
+
+```{python}
+L.plot_value_split(split, f"Framing separates catchers by about {frame_throw_ratio:.1f}× as many runs as throwing")
+```
+
+Framing happens on every pitch and throwing only on steal attempts, and over a
+season framing makes the bigger difference. A good framer (one standard
+deviation above average) saves about `{python} num(mlb_split["framing_sd"], 1)`
+runs a season in MLB, and a good thrower about
+`{python} num(mlb_split["throwing_sd"], 1)`. Across levels, throwing accounts for
+`{python} share_lo`–`{python} share_hi` of the spread in catchers' combined value,
+with framing the rest.
+
+- **They're separate skills.** A catcher's framing and throwing runs are barely
+  related (correlations of `{python} corr_lo` to `{python} corr_hi` by level), so
+  a good framer isn't necessarily a good thrower. Each needs its own look.
+
+### Framing: the rank travels even when the number doesn't
+
+As with position players, framing numbers swing much more in rookie ball (the spread is
+`{python} c_spread_ratio` times as wide in `{python} c_low_label` as in MLB), and
+a catcher keeps only about `{python} c_keep_pct` of their framing edge when they
+move up a level. The Run Value Translator below covers the numbers for any pair of
+levels. What stands out for catchers is how well **framing rank** holds up:
+
+```{python}
+L.plot_persistence(c_pers, "Higher-ranked framers stay above average more often", "catchers")
+```
+
+Catchers in the top 20% at their level are above average framers at the next
+level `{python} c_top_above` of the time, and those in the bottom 20% only
+`{python} c_bottom_above` of the time. That's a wider gap than for position players
+(`{python} f_top_above` against `{python} f_bottom_above`), making framing rank
+one of the steadiest signals in this report. It shows at the top too:
+`{python} c_above_share` of today's above-average MLB framers were above-average
+framers in the minors.
+
+### Caught-stealing rates across levels
+
+```{python}
+cs_level = L.caught_stealing_by_level(throws)
+cs_season = L.caught_stealing_by_season(throws)
+cs2 = cs_level[cs_level["attempted_base"] == "2B"].set_index("level_label")["caught_rate"]
+cs3 = cs_level[cs_level["attempted_base"] == "3B"].set_index("level_label")["caught_rate"]
+cs_all = cs_level.groupby("level_label").apply(
+    lambda g: (g["caught_rate"] * g["attempts"]).sum() / g["attempts"].sum(), include_groups=False)
+third_share = (throws.loc[throws["year"] >= L.CURRENT_RULES_FROM, "attempted_base"] == "3B").mean()
+
+
+def era_rate(years, minors):
+    d = cs_season[cs_season["year"].isin(years) & ((cs_season["level_label"] != "MLB") == minors)]
+    return (d["caught_rate"] * d["attempts"]).sum() / d["attempts"].sum()
+
+
+pre_minors, pre_mlb = era_rate(range(2016, 2020), True), era_rate(range(2016, 2020), False)
+odd_minors = era_rate([2021, 2022], True)
+now_minors, now_mlb = era_rate(range(L.CURRENT_RULES_FROM, 2100), True), era_rate(range(L.CURRENT_RULES_FROM, 2100), False)
+L.plot_cs_by_level(cs_level, "Runners are caught at about the same rate at every level")
+```
+
+Since `{python} L.CURRENT_RULES_FROM`, when MLB adopted the running-game rules
+already in use in the minors (bigger bases and limits on pickoffs), runners have
+been caught about as often at every level: `{python} pct(cs_all.min())`–`{python} pct(cs_all.max())`
+of attempts.
+
+- **Steals of second are caught far more often than steals of third:**
+  `{python} pct(cs2.min())`–`{python} pct(cs2.max())` against
+  `{python} pct(cs3.min())`–`{python} pct(cs3.max())`. Steals of third are rarer
+  (`{python} pct(third_share)` of attempts), likely because runners are more cautious 
+  when attempting a steal of third.
+- **The level doesn't change the odds much,** even though pop times get quicker
+  higher up (see below), suggesting runners may be more selective, 
+  attempting them only when success is more likely.
+
+```{python}
+L.plot_cs_by_season(cs_season, "The running game changed with the rules")
+```
+
+Over time, caught-stealing rates fell. Before 2020, minor-league runners were
+caught `{python} pct(pre_minors)` of the time and MLB runners
+`{python} pct(pre_mlb)`; since `{python} L.CURRENT_RULES_FROM` it's
+`{python} pct(now_minors)` in the minors and `{python} pct(now_mlb)` in MLB. The
+2021–2022 minor-league seasons, when the new rules were being tested, show
+unusually low rates (`{python} pct(odd_minors)`); treat those two seasons with
+care, since they may partly reflect how those games were recorded. Comparisons
+between levels in this section use `{python} L.CURRENT_RULES_FROM` and later.
+
+### What decides a Successful Steal
+
+```{python}
+L.plot_caught_stealing_grid(cs_grid, "The catcher's pop time and the pitcher's delivery both decide a steal")
+```
+
+Each cell shows how often runners were caught stealing second, by the catcher's
+pop time (across) and the pitcher's time to the plate (down). A fast pop behind
+a quick pitcher throws out `{python} pct(grid_best)` of runners; a slow pop
+behind a slow pitcher, `{python} pct(grid_worst)`.
+
+Looking at the catcher's pop time and arm strength, the pitcher's delivery time
+and the runner's speed together on the same attempts, a typical difference in
+each moves the caught-stealing rate by:
+
+- **Pitcher's time to the plate:** about `{python} f"{steal_fx['ttp_sd']:.0f}"`
+  points for `{python} f"{steal_fx['ttp_sd_seconds']:.2f}"` s quicker, the biggest
+  of the four.
+- **Runner speed:** about `{python} f"{abs(steal_fx['speed_sd']):.0f}"` points
+  for a runner `{python} f"{steal_fx['speed_sd_fts']:.1f}"` ft/s faster (in the
+  runner's favor).
+- **Catcher's pop time:** about `{python} f"{steal_fx['pop_sd']:.0f}"` points for
+  `{python} f"{steal_fx['pop_sd_seconds']:.2f}"` s faster, or
+  `{python} f"{steal_fx['pop_tenth']:.0f}"` points per tenth of a second.
+- **Catcher's arm strength:** about `{python} f"{steal_fx['arm_sd']:.0f}"` points
+  for a throw `{python} f"{steal_fx['arm_sd_mph']:.1f}"` mph harder, or about
+  `{python} f"{steal_fx['arm_mph']:.1f}"` points per mph.
+
+```{python}
+L.plot_cs_by_arm(cs_arm, "A stronger arm throws out more runners")
+```
+
+Arm strength and pop time are the two parts the catcher controls, and they're
+related but not the same thing (correlation `{python} num(steal_fx["arm_pop_corr"])`).
+Pop time also includes the transfer and footwork, so a catcher with a lighter arm
+can make up some ground with a quick release, and a strong arm can be wasted by a
+slow one. On the same throws, each is worth about the same. Catchers with the
+weakest arms throw out `{python} pct(cs_arm["caught_rate"].iloc[0])` of runners,
+against `{python} pct(cs_arm["caught_rate"].iloc[-1])` for the strongest. Even so,
+the pitcher's delivery matters at least as much as either.
+
+### Part of a catcher's throwing value belongs to the pitcher
+
+```{python}
+L.plot_delivery_effect(delivery, "Same pop time, very different throwing value")
+```
+
+To isolate the pitcher's part, this compares throws with nearly the same pop
+time (1.80–1.90 s). Behind quick-to-the-plate pitchers, catchers earn
+`{python} f"{delivery_quick * 100:+.1f}"` throwing runs per 100 attempts; behind
+slow ones, `{python} f"{delivery_slow * 100:+.1f}"`. The catcher's pop time was
+about the same; the pitcher's delivery made most of the difference.
+
+So a catcher's throwing runs partly reflect the staff they catch. When comparing
+catchers' throwing, check the time to the plate of the pitchers they worked with,
+and lean on pop time for the catcher's own part.
+
+### Throwing up the ladder
+
+```{python}
+L.plot_carryover(t_models, f"Catchers keep about {t_keep_pct} of their throwing edge at each step")
+```
+
+A catcher keeps about `{python} t_keep_pct` of their throwing edge at each step
+up, `{python} throw_vs_frame_carry` the `{python} c_keep_pct` they keep for
+framing. Throwing rank holds up `{python} throw_vs_frame_rank` framing rank:
+top-20% throwers are above average at the next level `{python} t_top_above` of
+the time, against `{python} t_bottom_above` for the bottom 20% (for framing,
+`{python} c_top_above` against `{python} c_bottom_above`). A catcher also gets a
+new pitching staff at every level, which moves their throwing numbers.
+
+- **Pop time gets quicker up the ladder.** The typical catcher's pop time goes
+  from `{python} f"{pop_low:.2f}"` s in `{python} pop_low_label` to
+  `{python} f"{pop_mlb:.2f}"` s in MLB, while runners are caught about
+  `{python} pct(cs_rate_all)` of the time at every level.
+- **Pop time travels better than throwing value.** For the
+  `{python} pop_carry_n` catchers with tracked throws at two neighbouring levels,
+  their pop time at the higher level kept about `{python} pct(pop_carry_slope)`
+  of its difference from average, against `{python} t_keep_pct` for throwing
+  value. That makes pop time a steadier read on a catcher's arm than the
+  throwing value.
+
+### Who moves up
+
+```{python}
+L.plot_promotion_compare(c_promo, t_promo, "Framing and throwing both help a catcher move up")
+```
+
+Catchers who rank well at either skill are more likely to move up. By framing,
+the top 20% moved up `{python} c_promo_top` of the time against
+`{python} c_promo_bottom` for the bottom 20%. By throwing, it was
+`{python} t_promo_top` against `{python} t_promo_bottom`. Framing also shows in
+who reaches MLB: `{python} c_mlb_top` of top-20% framers got there, against
+`{python} c_mlb_bottom` of the bottom 20%.
+
+### Catcher takeaways
+
+- Framing separates catchers by about `{python} f"{frame_throw_ratio:.1f}"`×
+  as many runs as throwing over a season, but the two are separate skills. Look
+  at both.
+- Framing rank is one of the steadiest signals in this report: good framers
+  usually stay good as they climb.
+- The pitcher's time to the plate moves steal outcomes at least as much as pop
+  time does, and it shows up in a catcher's throwing runs. Judge a catcher's arm
+  by pop time and in the context of their staff.
+- Pop time is a steadier read on a catcher's arm than the throwing value: it
+  gets quicker up the ladder and carries better from level to level.
+
+## Run Value Translator
+
+If a player saves X runs per 100 chances at one level, what should we expect at
+a higher level? And what if a position player moves to the position next door? This
+section answers both, using players who actually made the move.
+
+### Moving up a level
+
+These grids cover any pair of levels, not just the next step up. They use players
+who played at both levels and compare their full record at each.
+
+```{python}
+def tr_row(table, a, b):
+    return table[(table["from"] == a) & (table["to"] == b)].iloc[0]
+
+
+def translate(row, value):
+    return row["intercept"] + row["slope"] * value
+
+
+ex_f = tr_row(f_tr, "Low-A", "Double-A")
+ex_f_in, ex_f_out = 3.0, translate(ex_f, 3.0)
+ex_c = tr_row(c_tr, "Triple-A", "MLB")
+ex_c_in, ex_c_out = 0.3, translate(ex_c, 0.3)
+ex_t = tr_row(t_tr, "Double-A", "Triple-A")
+ex_t_in, ex_t_out = 5.0, translate(ex_t, 5.0)
+dsl_aa_f = tr_row(f_tr, "ROK DSL", "Double-A")
+dsl_aa_c = tr_row(c_tr, "ROK DSL", "Double-A")
+full_season = f_tr[(f_tr["from_num"] >= 3) & f_tr["slope"].notna()]
+fs_lo, fs_hi = pct(full_season["slope"].min()), pct(full_season["slope"].max())
+pos_cells = sum(int(t["slope"].notna().sum()) for t in f_tr_by_pos.values())
+pos_cells_total = sum(len(t) for t in f_tr_by_pos.values())
+L.plot_translation_grid(f_tr, "Position players: how much of a player's edge carries to each higher level",
+                        "Share of runs saved above average that shows up at the higher level (all positions)")
+```
+
+```{python}
+L.plot_translation_grid(c_tr, "Catcher framing: how much of the edge carries to each higher level",
+                        "Share of framing runs above average that shows up at the higher level")
+```
+
+```{python}
+L.plot_translation_grid(t_tr, "Catcher throwing: how much of the edge carries to each higher level",
+                        "Share of throwing runs above average that shows up at the higher level (Low-A and up)",
+                        levels=L.LEVEL_LABEL_ORDER[2:])
+```
+
+**How to read the grids:** find the level a player is at now on the left, then
+the level you're projecting to along the top. A cell reading 30% means a player
+who is 10 runs per 100 above average should be expected to be about 3 above
+average at that level. Grey cells don't have enough players who played at both
+levels to give a reliable answer.
+
+- **Between full-season levels** (Low-A and up), position players keep about
+  `{python} fs_lo`–`{python} fs_hi` of their edge from one level to any higher
+  one. For example, a position player at `{python} f"{ex_f_in:+.1f}"` in Low-A projects to
+  about `{python} f"{ex_f_out:+.1f}"` in Double-A.
+- **For catchers,** a framer at `{python} f"{ex_c_in:+.1f}"` in Triple-A projects to
+  about `{python} f"{ex_c_out:+.2f}"` in MLB, and a thrower at
+  `{python} f"{ex_t_in:+.0f}"` runs per 100 steal attempts in Double-A projects to
+  about `{python} f"{ex_t_out:+.1f}"` in Triple-A.
+- **Rookie-ball numbers barely translate.** Only
+  `{python} int(dsl_aa_f["players"])` position players in the data played at both ROK DSL and
+  Double-A, too few to say anything. For the `{python} int(dsl_aa_c["players"])`
+  catchers who did, DSL framing provided essentially no information about their Double-A
+  framing.
+- **By position:** the calculator below can also translate one position at a
+  time. Splitting by position leaves fewer players per cell, so only
+  `{python} pos_cells` of the `{python} pos_cells_total` position-and-level
+  combinations have enough players to translate.
+
+### Moving down a level
+
+```{python}
+ud = up_down.set_index(["group", "direction"])
+
+
+def ud_val(group, direction, col):
+    return ud.loc[(group, direction), col]
+
+
+f_down_steps = ud_val("Position players", "down", "steps")
+f_down_mlb = f_down_steps.get("MLB → Triple-A", 0)
+f_down_n = int(ud_val("Position players", "down", "moves"))
+c_down_n = int(ud_val("Catcher framing", "down", "moves"))
+L.plot_up_down(up_down, "A player's edge carries about as well going down as going up")
+```
+
+The same check works in reverse, using players who were sent down a level
+(`{python} f_down_n` position player moves, `{python} f_down_mlb` of them from MLB to
+Triple-A, and `{python} c_down_n` catcher framing moves). To compare fairly, the
+chart measures each player against their peers at each level, because the spread
+of raw numbers is wider at lower levels.
+
+- **Catchers keep about the same share either way:** about
+  `{python} pct(ud_val("Catcher framing", "up", "z_slope"))` of their framing edge
+  going up and `{python} pct(ud_val("Catcher framing", "down", "z_slope"))` going
+  down, and about `{python} pct(ud_val("Catcher throwing", "up", "z_slope"))` and
+  `{python} pct(ud_val("Catcher throwing", "down", "z_slope"))` for throwing.
+- **Position players keep a little less going down** (`{python} pct(ud_val("Position players", "down", "z_slope"))`
+  against `{python} pct(ud_val("Position players", "up", "z_slope"))`), on a smaller
+  sample made up mostly of players sent down from MLB.
+- **Good defenders stay good after a demotion.** Catchers who were top-20% framers
+  before being sent down were above average at the lower level
+  `{python} pct(ud_val("Catcher framing", "down", "top_above"))` of the time.
+
+If facing tougher competition were what shrinks a player's edge, players moving
+down would keep more of theirs. They keep about the same share (position players even a
+little less). That points to the main reason the edge shrinks after any move:
+only about a third of one season's number reflects lasting skill, and the rest
+doesn't repeat, whichever direction the player goes. So a translation should
+pull a number toward average by about the same amount up or down the ladder.
+
+### Switching to a neighbouring position
+
+```{python}
+ok_swaps = swaps[swaps["slope"].notna()].copy()
+ok_swaps["change"] = ok_swaps["mean_to"] - ok_swaps["mean_from"]  # same players, new spot minus old
+lines = ["| Switch | Players | Same players' change | Edge that carries over |",
+         "|---|---:|---:|---:|"]
+for r in ok_swaps.itertuples():
+    lines.append(f"| {r[1]} → {r[2]} | {r.players} | {r.change:+.1f} | {r.slope:.0%} |")
+from IPython.display import Markdown
+too_few_swaps = swaps[swaps["slope"].isna()].drop_duplicates("players")
+def swap_gap(frm, to):
+    rows = ok_swaps[ok_swaps["from"].isin(frm) & (ok_swaps["to"] == to)]
+    return f"{abs((rows['change'] * rows['players']).sum() / rows['players'].sum()):.1f}"
+
+
+gap_cf, gap_ss_3b, gap_ss_2b = swap_gap(["LF", "RF"], "CF"), swap_gap(["3B"], "SS"), swap_gap(["2B"], "SS")
+n_1b_2b = int(swaps.loc[(swaps["from"] == "1B") & (swaps["to"] == "2B"), "players"].iloc[0])
+Markdown("\n".join(lines))
+```
+
+This uses players who qualified at two neighbouring positions in the same season
+and level, so the player and the competition are the same and only the position
+changes. "Same players' change" is how much better or worse those players did at
+the new spot, in runs per 100 chances. "Edge that carries over" is how much of a
+player's advantage over their peers at the old spot shows up at the new one.
+
+- **The harder spot costs runs.** The same players average about
+  `{python} gap_cf` runs per 100 chances less in CF than in the corners and
+  `{python} gap_ss_3b` less at SS than at 3B. The step from 2B to SS is smaller,
+  about `{python} gap_ss_2b`.
+- **Some of the edge carries over.** A position player above average at one spot keeps
+  part of that edge at the neighbouring one, but less than half.
+- **1B ↔ 2B:** only `{python} n_1b_2b` players played both in the same season
+  and level, too few to translate.
+
+::: {.content-visible when-format="html"}
+### Try it: translate a number
+
+```{python}
+import json
+from IPython.display import HTML
+
+
+def fits_json(table, key=lambda r: f"{int(r.from_num)}-{int(r.to_num)}"):
+    return {key(r): {
+                "players": int(r.players),
+                "slope": None if np.isnan(r.slope) else round(float(r.slope), 4),
+                "intercept": None if np.isnan(r.intercept) else round(float(r.intercept), 4),
+                "sd": None if np.isnan(r.resid_sd) else round(float(r.resid_sd), 4)}
+            for r in table.itertuples()}
+
+
+neighbours = {}
+for a, b in L.ADJACENT_POSITIONS:
+    la, lb = L.POSITION_LABELS[a], L.POSITION_LABELS[b]
+    neighbours.setdefault(la, []).append(lb)
+    neighbours.setdefault(lb, []).append(la)
+neighbours = {p: neighbours[p] for p in L.POSITION_LABEL_ORDER if p in neighbours}
+
+translator_data = {
+    "levels": LEVEL_LABEL_ORDER,
+    "groups": {
+        "fielders": {
+            "unit": "chances", "noun": "position players", "firstLevel": 1,
+            "positions": [["ALL", "All positions"]] + [[p, p] for p in L.POSITION_LABEL_ORDER],
+            "fits": {"ALL": fits_json(f_tr), **{p: fits_json(t) for p, t in f_tr_by_pos.items()}},
+            "default": {"from": 3, "to": 5, "value": 2.0, "step": 0.5}},
+        "framing": {
+            "unit": "called pitches", "noun": "catchers", "firstLevel": 1,
+            "fits": {"ALL": fits_json(c_tr)},
+            "default": {"from": 6, "to": 7, "value": 0.2, "step": 0.05}},
+        "throwing": {
+            "unit": "steal attempts", "noun": "catchers", "firstLevel": 3,
+            "fits": {"ALL": fits_json(t_tr)},
+            "default": {"from": 5, "to": 6, "value": 5.0, "step": 1}},
+    },
+    "swaps": {
+        "neighbours": neighbours,
+        "fits": fits_json(swaps, key=lambda r: f"{r[1]}>{r[2]}"),
+        "default": {"from": "SS", "to": "3B"},
+    },
+}
+HTML((ARTICLE_DIR / "translator.html").read_text(encoding="utf-8")
+     .replace("__TRANSLATOR_DATA__", json.dumps(translator_data)))
+```
+:::
+
+## What This Means for Player Development
+
+- **Look at rank, not the raw number.** Where a player ranks among their peers
+  tells you more about the next level than their runs-saved total does.
+- **Expect big numbers to come down.** A player well above average at one
+  level will usually still be above average at the next, but by less.
+- **Be careful with rookie-ball numbers.** They swing the most, and they
+  barely translate to the upper levels.
+- **Minor-league framing is a strong signal.** Catchers who frame well in the
+  minors usually keep framing well.
+- **Judge a catcher's arm by pop time, in the context of their staff.** A
+  catcher's throwing runs rise and fall with how quickly their pitchers get the
+  ball to the plate.
+- **Don't expect promotions to fix defense.** Poor position players keep moving up, so
+  work on defense in the lower levels, while players are still gaining ground.
+- **Position changes show up quickly.** Expect a player's grade to drop at a
+  harder position and rise at an easier one.
+
+## Data and Methods
+
+### Caveats
+
+- **Who's included.** A position player needs at least
+  `{python} L.FIELDING_MIN_OPPORTUNITIES` chances at one position in a season at
+  a level, and a catcher needs at least `{python} L.FRAMING_MIN_OPPORTUNITIES`
+  called pitches. These cutoffs make sure there's enough data to include a
+  player-season. They don't make one season's number reliable on its own.
+- **The MLB comparisons only look back.** They include players who reached
+  MLB with a complete minor-league record. They say nothing about players who
+  were released, stalled, or never reached the cutoffs, and they use a single
+  season (`{python} f_year`), not full careers.
+- **Not cause and effect.** The age and position results show patterns, not
+  causes. For example, a team may move a player to an easier position because
+  they were already losing range.
+- **Framing only for catchers.** The framing results don't account for the
+  pitching staff, umpires, or changes in a catcher's receiving technique.
+- **Throwing tracking is thin.** Throwing covers
+  `{python} throw_first_year`–`{python} throw_last_year`, Low-A to MLB (the source
+  has one combined rookie code, which can't be split into DSL and Complex League
+  like the rest of this report, so rookie ball is left out). Pop time is tracked
+  on only `{python} pct(throws["catcher_pop_time"].notna().mean())` of steal
+  attempts (`{python} pop_year_text`), arm strength on
+  `{python} pct(throws["arm_strength"].notna().mean())` and the pitcher's time to
+  the plate on `{python} pct(throws["ttp"].notna().mean())`, so the steal model and
+  grid rest on a few thousand attempts.
+- **The Position Players section leaves out catchers.** Catchers never reach the
+  `{python} L.FIELDING_MIN_OPPORTUNITIES`-chance fielding cutoff, so that section
+  covers the other seven positions, and catchers get their own section.
+
+### Data
+
+The position player data covers `{python} n_plays` modeled plays by
+`{python} n_players` players from `{python} first_season` to
+`{python} last_season`. After the cutoff, that leaves `{python} n_f_rows`
+player-season-level-position rows (`{python} n_f_players` players). The framing
+data has `{python} n_c_rows` qualifying catcher-season-level rows
+(`{python} n_c_catchers` catchers).
+
+- **Sources:** `queries/play_by_play.sql` (fielding plays),
+  `queries/framing_level_agg.sql` (framing, aggregated in BigQuery from the
+  pitch-level `frv-catching` table), `queries/catcher_throwing.sql` (catcher
+  throwing on stolen-base attempts, from the `xsb` table with level and season
+  added from the catcher-throw play-by-play), and birth dates from
+  `tblPlayer_Pro`.
+- **Levels**, in order: ROK DSL, Complex League, Low-A, High-A, Double-A,
+  Triple-A, MLB. The two rookie levels are kept separate because they are
+  different competitive and tracking environments.
+
+### Definitions
+
+- **FRV/100** ("runs saved per 100 chances"): SFG-modeled defensive run value
+  (`-runs_plus_minus`) summed over a player-season at a level and divided by
+  opportunities, times 100. Position player opportunities are modeled plays; framing
+  opportunities are called pitches (`ball_called` / `strike_called`).
+- **Percentile** ("rank among peers"): the percentile rank of FRV/100 within
+  the same season and level (and, for position players, position).
+- **Spread**: the 90th minus the 10th percentile of FRV/100 at a level. For
+  position players it goes from `{python} f_low_spread` in `{python} f_low_label` to
+  `{python} f_mlb_spread` in MLB. For framing it goes from `{python} c_low_spread`
+  to `{python} c_mlb_spread`. The median qualified player has
+  `{python} f_low_opps` fielding chances in `{python} f_low_label` against
+  `{python} f_mlb_opps` in MLB, and a catcher sees `{python} c_low_opps` called
+  pitches against `{python} c_mlb_opps`, which is part of why the lower levels
+  are noisier.
+
+### How reliable are these numbers?
+
+The rates in this report (fielding runs per 100 chances, framing runs per 100
+called pitches, throwing runs per 100 steal attempts) mix two things: the
+player's real skill and chance. Reliability is the share that reflects the
+player. At 50%, a rate is half signal and half noise; the more chances behind
+it, the higher it gets.
+
+```{python}
+f_rel_pts = L.split_half_points(dfc, ["player_code", "year", "level", "position"], "sfg_rv",
+                                ["year", "level", "position"], [10, 25, 50, 75, 100, 150, 200])
+c_rel_pts = L.split_half_points_from_sums(
+    L.cached_query("framing_split_half", (L.QUERY_DIR / "framing_split_half.sql").read_text(encoding="utf-8"),
+                   refresh).rename(columns={"catcher_sfg_id": "player_code"}),
+    ["year", "level"])
+t_rel_pts = L.split_half_points(throws, ["player_code", "year", "level"], "throw_runs", ["year", "level"],
+                                [5, 10, 20, 30, 45, 60, 80])
+
+rel_rows = []
+for label, unit, pts, q, cutoff, rows, keys, peers in [
+    ("Fielding FRV/100", "chances", f_rel_pts, f_q, L.FIELDING_MIN_OPPORTUNITIES, f_agg,
+     ["player_code", "position"], ["year", "level", "position"]),
+    ("Framing runs/100 pitches", "called pitches", c_rel_pts, c_q, L.FRAMING_MIN_OPPORTUNITIES, c_agg,
+     ["player_code"], ["year", "level"]),
+    ("Throwing runs/100 attempts", "steal attempts", t_rel_pts, t_q, L.THROWING_MIN_ATTEMPTS, t_all,
+     ["player_code"], ["year", "level"]),
+]:
+    n50, ext50 = L.n_for_reliability(pts, 0.5)
+    n70, ext70 = L.n_for_reliability(pts, 0.7)
+    typical = q["opportunities"].median()
+    yoy_r, yoy_n = L.season_to_season(rows, keys, peers, cutoff)
+    rel_rows.append({"label": label, "unit": unit, "points": pts, "typical": typical,
+                     "n50": n50, "ext50": ext50, "n70": n70, "ext70": ext70, "cutoff": cutoff,
+                     "rel_cutoff": float(L.reliability_at(pts, cutoff)),
+                     "rel_typical": float(L.reliability_at(pts, typical)), "yoy": yoy_r, "yoy_n": yoy_n})
+rel = {r["label"].split()[0].lower(): r for r in rel_rows}
+
+L.plot_reliability(rel_rows, "How many chances before a rate mostly reflects the player")
+```
+
+```{python}
+def n_text(n, extrapolated):
+    return f"{n:,.0f}{'*' if extrapolated else ''}"
+
+
+lines = ["| Measure | 50% reliable at | 70% reliable at | At the cutoff | Typical qualifying season | Next season (r) |",
+         "|---|---:|---:|---:|---:|---:|"]
+for r in rel_rows:
+    lines.append(f"| {r['label']} | {n_text(r['n50'], r['ext50'])} {r['unit']} | "
+                 f"{n_text(r['n70'], r['ext70'])} | {r['rel_cutoff']:.0%} ({r['cutoff']:,}) | "
+                 f"{r['rel_typical']:.0%} ({r['typical']:,.0f}) | {r['yoy']:.2f} |")
+Markdown("\n".join(lines) + "\n\n\\* Past the largest sample measurable, so extended (see below).")
+```
+
+- **A single season of FRV/100 is mostly noise.** A position player needs about
+  `{python} n_text(rel["fielding"]["n50"], rel["fielding"]["ext50"])` chances
+  for the rate to be half signal. A typical qualifying season
+  (`{python} f"{rel['fielding']['typical']:,.0f}"` chances) is about
+  `{python} pct(rel["fielding"]["rel_typical"])` reliable, and the report's
+  `{python} L.FIELDING_MIN_OPPORTUNITIES`-chance cutoff about
+  `{python} pct(rel["fielding"]["rel_cutoff"])`. That's why this report leans on
+  rank and on pooled records, and why a single season's number should be pulled
+  well toward average before it's used to judge a player.
+- **Framing gets enough pitches within a season.** It reaches 50% at about
+  `{python} n_text(rel["framing"]["n50"], rel["framing"]["ext50"])` called
+  pitches, and a catcher sees far more than that, so a typical season (`{python} f"{rel['framing']['typical']:,.0f}"`
+  pitches) is about `{python} pct(rel["framing"]["rel_typical"])` reliable. But it
+  repeats less from one season to the next (r = `{python} num(rel["framing"]["yoy"])`)
+  than that suggests. Pitches within a season share the same pitching staff,
+  umpires and parks, so part of what looks like a catcher's skill within a season
+  is their situation, and it changes when the situation does.
+- **Throwing is about half signal in a typical season.** It takes about
+  `{python} n_text(rel["throwing"]["n50"], rel["throwing"]["ext50"])` steal
+  attempts to reach 50%, about as many as a catcher faces in a typical season
+  (`{python} f"{rel['throwing']['typical']:,.0f}"`). Pop time, which is measured
+  directly on each throw, is a steadier read on the arm (see Catchers).
+- **Season to season,** a player's rate (against their peers) correlates
+  `{python} num(rel["fielding"]["yoy"])` for fielding,
+  `{python} num(rel["framing"]["yoy"])` for framing and
+  `{python} num(rel["throwing"]["yoy"])` for throwing. Those are in line with the
+  roughly one-third carry-over between levels: most of the shrinking after a move
+  is the noise in one season's number washing out.
+
+**How it's measured:** for each sample size, the analysis takes player-seasons with at least
+twice that many chances, put their chances in random order, and correlate the
+rate over the first half with the rate over the second half across players, each
+half measured against peers at the same level and season (and position, for
+position players). That correlation is the reliability of a rate based on that many
+chances. Values between measured sizes are interpolated. Beyond the largest size with at
+least 30 players, the curve is extended from the largest measured point with the
+Spearman–Brown formula (marked with *), which assumes the next chances behave
+like the earlier ones and may run a little high. Season to season uses each
+player's rate against peers in consecutive seasons (same position for position players),
+with seasons at several levels combined. The framing split uses
+`queries/framing_split_half.sql`, which orders each catcher-season's pitches
+randomly in BigQuery.
+
+### How carry-over is measured
+
+For each pair of consecutive stints one level apart (a stint is a player's
+season at a level, ordered by its first and last game dates, so a demotion in
+the middle of a season isn't mistaken for a promotion), a linear
+regression of next-level FRV/100 on current-level FRV/100 is fit separately for each
+step up the ladder. The slope measures how differences in observed FRV/100
+translate between levels; it's what the charts above show as the "share carried
+over". 1.0 would mean a difference carries over in full, and 0 would mean no
+relationship. Position player slopes run `{python} f_slope_lo`–`{python} f_slope_hi`
+(average `{python} num(f_slope_avg)`), and framing slopes run
+`{python} c_slope_lo`–`{python} c_slope_hi` (average `{python} num(c_slope_avg)`).
+Steps with fewer than 30 position player pairs or 20 catcher pairs aren't fit.
+
+**Does the narrowing spread explain the drop?** Because each level's spread is
+narrower than the one below, a player who keeps exactly the same rank will
+still show a smaller raw number. To check, FRV/100 was standardized to a
+z-score within each season and level before refitting (orange bars below).
+
+- **Position players:** the average slope barely moves (`{python} num(f_slope_avg)` →
+  `{python} num(f_z_avg)`), so nearly all of the drop is real regression.
+- **Framing:** the average slope rises (`{python} num(c_slope_avg)` →
+  `{python} num(c_z_avg)`), so part of the raw drop reflects the narrowing
+  scale. The slopes still stay well below 1.0.
+
+```{python}
+L.plot_slopes(f_models, "Position players: raw vs. standardized carry-over slopes")
+L.plot_slopes(c_models, "Catcher framing: raw vs. standardized carry-over slopes")
+```
+
+**Rank persistence.** The same back-to-back pairs are grouped by their
+lower-level percentile (in 20-point bands). For each band, the analysis counts the share
+finishing above the 50th percentile and above the 80th percentile at the next
+level. Top-20% position players stay in the top 20% `{python} f_top_top` of the time
+(bottom-20%: `{python} f_bottom_top`). For catchers it's `{python} c_top_top`
+(bottom-20%: `{python} c_bottom_top`).
+
+### MLB comparison group
+
+The comparison group is players in the most recent MLB season
+(`{python} f_year`) who qualified at two or more distinct minor-league levels
+before their first MLB game and debuted after
+`{python} L.MINOR_HISTORY_DEBUT_CUTOFF`. Play-by-play data starts in 2021, so
+earlier debuts would have incomplete histories. Minor-league games after the
+debut, including rehab assignments, are excluded. That leaves
+`{python} f_cohort_n` position players (`{python} f_above_n` above average) and
+`{python} c_cohort_n` catchers (`{python} c_above_n` above average). MLB rank
+is within position for position players.
+
+The "above average in the minors" share uses each player's average minor-league
+percentile. Across everyone in the group, the correlation between average
+minor-league percentile and current MLB percentile is modest:
+`{python} f_cohort_r` for position players and `{python} c_cohort_r` for catchers. That's
+why the article says a strong minor-league record improves the odds rather than
+settles the question.
+
+### Run Value Translator
+
+For every pair of levels, the analysis selects players with a qualifying record at both (for
+position players, at the same position) whose first game at the higher level came after
+their first game at the lower one. Each player's seasons at a level are pooled into one record, which
+must meet the usual cutoff (`{python} L.FIELDING_MIN_OPPORTUNITIES` chances for
+position players, `{python} L.FRAMING_MIN_OPPORTUNITIES` called pitches for catchers).
+A straight line was then fit to the higher-level rate using the lower-level rate.
+
+- The percentage in each cell is the slope. A projection is intercept + slope ×
+  the lower-level rate, so it also reflects any difference in average between
+  the two groups.
+- Pairs with fewer than `{python} TRANSLATION_MIN_PLAYERS["fielders"]` position players
+  or `{python} TRANSLATION_MIN_PLAYERS["catchers"]` catchers are left blank. The
+  same applies to the by-position translations, which are fit separately for each
+  position on players who played that position at both levels.
+- **Catcher throwing** uses throwing runs per 100 steal attempts (measured against
+  the average attempt at that level and season), with at least
+  `{python} L.THROWING_MIN_ATTEMPTS` attempts at each level, Low-A and up.
+- **Position switches** use players who qualified at two neighbouring positions
+  (1B–2B, 2B–SS, SS–3B, LF–CF, CF–RF) in the same season and level, fitting FRV/100
+  at the new position on FRV/100 at the old one, separately in each direction.
+  Levels are pooled, so the translation doesn't depend on level.
+- The calculator's likely range is the projection ± 1.28 residual standard
+  deviations, which covers about 80% of players. Records here pool all seasons at
+  a level, so a single season will usually be noisier than that range suggests.
+- Fitting each pair directly avoids chaining the step-by-step results, which
+  would multiply every step's regression and understate how much carries over
+  across several levels.
+
+### Who moves up
+
+For every qualified minor-league season through `{python} promo_last_start`, the
+analysis checks whether the player later appeared at a higher level (a stint there that
+started after this one did, at any position, with any number of chances) and
+whether they appeared in MLB. Going by dates means a player sent down in the
+middle of a season isn't counted as moving up because of where they started the
+year. Ending in `{python} promo_last_start` gives every player at
+least `{python} PROMOTION_WINDOW` more seasons to move up. Seasons after a
+player's first MLB season are left out, so veterans sent back to the minors
+don't count as "reaching" MLB. Rank is the same within-level percentile used
+elsewhere. That leaves `{python} f"{len(f_promo_rows):,}"` position player seasons and
+`{python} f"{len(c_promo_rows):,}"` catcher seasons.
+
+This also matters for the rank persistence results. Those only include players
+who were promoted, so if poor position players were rarely promoted, the results would
+describe a select group. Because most poor position players do move up, that selection
+effect is small for position players. It is larger for catchers.
+
+### Catcher throwing
+
+Each row is a stolen-base attempt (steals of second and third) at Low-A to MLB.
+The catcher's value is the stolen-base model's `catcher_runs_plus_minus`, which
+covers nearly every attempt (the throw model's value only exists on attempts
+with a tracked throw, and correlates 0.98 with it where both exist). As with
+framing, throwing runs are `-runs_plus_minus`, so positive means runs saved by
+the catcher. The model's catcher, pitcher and baserunner values for an attempt
+are nearly identical (correlation above 0.99): each is close to the full value
+of the attempt rather than a split of it, which is why the pitcher's delivery
+shows up in the catcher's number. Pop times outside 1.6–2.4 s, times to the plate outside 1.1–1.8 s
+runner speeds outside 22–32 ft/s and arm strengths outside 60–95 mph are treated
+as tracking errors and dropped.
+
+- **Framing vs. throwing:** for catcher-seasons at a level with a qualifying
+  framing season (`{python} L.FRAMING_MIN_OPPORTUNITIES`+ called pitches) and any
+  steal attempts, the standard deviation of season framing runs is compared with
+  that of season throwing runs. Throwing's share is its variance over the sum of
+  both variances. Throwing's spread includes more noise, since a season has only
+  a few dozen attempts.
+- **Steal model:** a logistic regression of caught stealing on the catcher's pop
+  time and arm strength, the pitcher's time to the plate, runner sprint speed and
+  level, on the `{python} f"{steal_n:,}"` steals of second where all four were
+  tracked. Arm strength on its own uses the `{python} f"{arm_n:,}"` steals of
+  second where it was tracked, split into four equal groups. The
+  effects quoted are average marginal effects for one standard deviation. The
+  grid uses the `{python} f"{grid_n:,}"` steals of second with both pop time and
+  time to the plate tracked; cells with fewer than 50 attempts are left blank.
+- **Pitcher effect:** throws with a pop time of 1.80–1.90 s, split into thirds by
+  the pitcher's time to the plate.
+- **Across levels:** catcher-season-level throwing needs
+  `{python} L.THROWING_MIN_ATTEMPTS`+ steal attempts; carry-over and rank
+  persistence use the same method as framing, on throwing runs per 100 attempts.
+  Pop time carry-over uses catchers with 10+ tracked throws at two neighbouring
+  levels (slope `{python} num(pop_carry_slope)`, correlation
+  `{python} num(pop_carry_r)`, `{python} pop_carry_n` catchers). Season to season
+  at any level, a catcher's average pop time correlates
+  `{python} num(pop_repeat_r)` with the next season (`{python} pop_repeat_n`
+  catchers with 10+ tracked throws in both).
+
+### Age
+
+**Age** is as of July 1 of the season (whole years).
+
+**Runs saved at each age:** total runs saved divided by total chances for all
+qualifying player-seasons at that age, across all levels. This means seasons
+with more chances count more. Ages with fewer than 30 player-seasons are left
+out, and the band is a 95% bootstrap interval from resampling players. The peak
+and low point quoted in the text leave out ages where most seasons are in the
+two rookie levels.
+Qualifying position players average slightly above zero overall, so the shape matters
+more than where the line sits relative to zero.
+
+**Keeping pace with peers:** this chart uses pairs
+of consecutive seasons by the same player at the same position, at **any
+level** (`{python} f"{len(f_age_pairs):,}"` pairs), so players who move up are
+kept. The outcome is the player's percentile within season, level and position
+in the second season.
+
+Chaining raw percentile changes would be misleading. Players who qualify in two
+seasons in a row were above average the first year and drift back toward the
+middle the next, whatever their age. A weighted regression therefore uses
+next-season percentile as the outcome, with age (one term per age), the starting percentile
+(centered at 50), and whether the player moved up or down a level:
+
+- Each bar is the age term minus 50: the expected change for a player who
+  starts at the median and stays at the same level.
+- Weights are the harmonic mean of the two seasons' chances. Only ages with at
+  least 40 pairs are shown (`{python} age_first`–`{python} age_last`).
+- About `{python} pct(f_age_effects["carry"])` of a player's distance from the
+  median carries into the next season. Moving up a level costs
+  `{python} f"{abs(f_age_effects['moved_up']) * 100:.1f}"` rank points on top of
+  that.
+- The error bars are 95% bootstrap intervals from resampling players.
+
+Rank is relative to peers who are also aging and moving up, so this shows
+whether a position player keeps pace with their competition, not how their absolute
+fielding changes. If everyone in a peer group improved at the same rate, none of
+them would change rank, so that kind of improvement doesn't show up here.
+
+### Position
+
+- **Position spread:** `{python} widest_pos` has the widest spread
+  (`{python} widest_spread`) and `{python} narrowest_pos` the narrowest
+  (`{python} narrowest_spread`). Positions are ordered along the traditional
+  defensive spectrum: SS, CF, 2B, 3B, RF, LF, 1B.
+- **Two positions in one season:** `{python} n_pairs` player-seasons in which a
+  player qualified at exactly two positions in the same season and level. The
+  harder position graded worse `{python} harder_worse` of the time, by an
+  average of `{python} avg_gap` percentile points. The largest gap among
+  pairings with 50+ cases was `{python} big_pair[0]` compared with
+  `{python} big_pair[1]` (`{python} big_pair_gap` points,
+  `{python} big_pair_n` cases).
+- **Position changes:** a player's primary position each season is the
+  qualified position with the most chances. `{python} n_moves` season-to-season
+  changes in primary position were found, and `{python} share_easier` were moves
+  toward the easier end of the spectrum.
+
+### Last Data Update
+
+`{python} data_pulled`.

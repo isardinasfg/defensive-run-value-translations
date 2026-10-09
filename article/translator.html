@@ -1,0 +1,137 @@
+<div class="translator" id="translator">
+  <div class="tr-seg" role="group" aria-label="What to translate">
+    <button type="button" data-group="fielders" class="active">Position players</button>
+    <button type="button" data-group="framing">Catcher framing</button>
+    <button type="button" data-group="throwing">Catcher throwing</button>
+  </div>
+  <div class="tr-seg tr-mode" role="group" aria-label="Translation">
+    <button type="button" data-mode="level" class="active">Move up a level</button>
+    <button type="button" data-mode="swap">Switch position</button>
+  </div>
+  <div class="tr-fields">
+    <label>Runs saved per 100 <span class="tr-unit">chances</span>
+      <input id="tr-value" type="number" inputmode="decimal">
+    </label>
+    <label class="tr-level-only tr-position-field">Position
+      <select id="tr-position"></select>
+    </label>
+    <label class="tr-level-only">At level
+      <select id="tr-from"></select>
+    </label>
+    <label class="tr-level-only">Projected to
+      <select id="tr-to"></select>
+    </label>
+    <label class="tr-swap-only">Playing now
+      <select id="tr-swap-from"></select>
+    </label>
+    <label class="tr-swap-only">Switching to
+      <select id="tr-swap-to"></select>
+    </label>
+  </div>
+  <div class="tr-result" id="tr-result" aria-live="polite"></div>
+</div>
+
+<script>
+(() => {
+  const DATA = __TRANSLATOR_DATA__;
+  const root = document.getElementById("translator");
+  const $ = (sel) => root.querySelector(sel);
+  const valueIn = $("#tr-value"), posSel = $("#tr-position"), fromSel = $("#tr-from"), toSel = $("#tr-to");
+  const swapFrom = $("#tr-swap-from"), swapTo = $("#tr-swap-to"), result = $("#tr-result");
+  let group = "fielders", mode = "level";
+
+  const fmt = (v, k) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(k);
+  const cfg = () => DATA.groups[group];
+  const digits = () => (cfg().default.step < 0.1 ? 2 : 1);
+  const options = (items, selected) => items.map(([v, l]) =>
+    `<option value="${v}"${String(v) === String(selected) ? " selected" : ""}>${l}</option>`).join("");
+
+  function fillLevels(from, to) {
+    const first = cfg().firstLevel;
+    fromSel.innerHTML = options(DATA.levels.slice(first - 1, -1).map((l, i) => [i + first, l]), from);
+    fillTo(to);
+  }
+  function fillTo(keep) {
+    const from = +fromSel.value;
+    toSel.innerHTML = options(DATA.levels.map((l, i) => [i + 1, l]).filter(([n]) => n > from), keep);
+  }
+  function fillSwapTo(keep) {
+    swapTo.innerHTML = options(DATA.swaps.neighbours[swapFrom.value].map((p) => [p, p]), keep);
+  }
+
+  function render() {
+    root.querySelectorAll(".tr-seg:not(.tr-mode) button").forEach((b) => b.classList.toggle("active", b.dataset.group === group));
+    root.querySelectorAll(".tr-mode button").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+    $(".tr-mode").hidden = group !== "fielders";
+    root.querySelectorAll(".tr-level-only").forEach((el) => (el.hidden = mode !== "level"));
+    root.querySelectorAll(".tr-swap-only").forEach((el) => (el.hidden = mode !== "swap"));
+    $(".tr-position-field").hidden = mode !== "level" || group !== "fielders";
+    $(".tr-unit").textContent = cfg().unit;
+    update();
+  }
+
+  function setGroup(g) {
+    group = g;
+    if (g !== "fielders") mode = "level";
+    const d = cfg().default;
+    valueIn.step = d.step;
+    valueIn.value = d.value;
+    posSel.value = "ALL";
+    fillLevels(d.from, d.to);
+    render();
+  }
+  function setMode(m) {
+    mode = m;
+    render();
+  }
+
+  function show(fit, label, sub, basis) {
+    const x = parseFloat(valueIn.value);
+    if (Number.isNaN(x)) { result.innerHTML = `<p class="tr-none">Enter a runs-saved number.</p>`; return; }
+    const y = fit.intercept + fit.slope * x, half = 1.28 * fit.sd, k = digits();
+    result.innerHTML = `
+      <div class="tr-label">${label}</div>
+      <div class="tr-number">${fmt(y, k)}</div>
+      <div class="tr-sub">runs saved per 100 ${sub}</div>
+      <p>Likely range: <strong>${fmt(y - half, k)} to ${fmt(y + half, k)}</strong> (about 8 in 10 players). ${basis}</p>`;
+  }
+  function tooFew(text) { result.innerHTML = `<p class="tr-none">${text}</p>`; }
+
+  function update() {
+    if (mode === "swap") {
+      const a = swapFrom.value, b = swapTo.value, fit = DATA.swaps.fits[`${a}>${b}`];
+      if (!fit || fit.slope === null) {
+        return tooFew(`Only <strong>${fit ? fit.players : 0} players</strong> in the data qualified at both
+          ${a} and ${b} in the same season and level, which isn't enough to translate reliably.`);
+      }
+      return show(fit, `Expected at ${b}`, "chances",
+        `Based on ${fit.players} players who played both ${a} and ${b} in the same season and level.`);
+    }
+    const from = +fromSel.value, to = +toSel.value;
+    const pos = group === "fielders" ? posSel.value : "ALL";
+    const fit = cfg().fits[pos][`${from}-${to}`];
+    const fromName = DATA.levels[from - 1], toName = DATA.levels[to - 1];
+    const who = pos === "ALL" ? cfg().noun : `players at ${pos}`;
+    if (!fit || fit.slope === null) {
+      return tooFew(`Only <strong>${fit ? fit.players : 0} ${who}</strong> in the data played at both
+        ${fromName} and ${toName}, which isn't enough to translate reliably.`);
+    }
+    show(fit, `Expected at ${toName}`, cfg().unit,
+      `About ${Math.round(Math.max(fit.slope, 0) * 100)}% of a player's edge carries from ${fromName} to
+       ${toName}, based on ${fit.players} ${who} who played at both.`);
+  }
+
+  // one-time setup
+  posSel.innerHTML = options(DATA.groups.fielders.positions, "ALL");
+  swapFrom.innerHTML = options(Object.keys(DATA.swaps.neighbours).map((p) => [p, p]), DATA.swaps.default.from);
+  fillSwapTo(DATA.swaps.default.to);
+
+  root.querySelectorAll(".tr-seg:not(.tr-mode) button").forEach((b) => b.addEventListener("click", () => setGroup(b.dataset.group)));
+  root.querySelectorAll(".tr-mode button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  fromSel.addEventListener("change", () => { fillTo(toSel.value); update(); });
+  swapFrom.addEventListener("change", () => { fillSwapTo(swapTo.value); update(); });
+  [toSel, posSel, swapTo].forEach((el) => el.addEventListener("change", update));
+  valueIn.addEventListener("input", update);
+  setGroup("fielders");
+})();
+</script>

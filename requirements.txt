@@ -1,0 +1,8 @@
+# Python 3.13; versions as used to build the article.
+pandas==3.0.5
+numpy==2.5.2
+matplotlib==3.11.1
+pyarrow==25.0.1
+google-cloud-bigquery==3.44.0
+db-dtypes==1.7.1
+jupyter==1.1.1
