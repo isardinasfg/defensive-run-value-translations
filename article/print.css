@@ -1,0 +1,18 @@
+/* Print layout for the coach PDF (render.ps1 injects this into a copy of the
+   HTML and prints it with Edge). Hides the sidebar, the interactive translator
+   and the technical methods; keeps Caveats, Definitions and the repo link. */
+@page { size: Letter; margin: 0.6in 0.6in; }
+@media print {
+  #quarto-sidebar-toc-left, #quarto-margin-sidebar, #TOC,
+  #try-it-translate-a-number,
+  #data, #how-reliable-are-these-numbers, #how-carry-over-is-measured,
+  #mlb-comparison-group, #run-value-translator-1, #who-moves-up-1,
+  #catcher-throwing, #age, #position { display: none !important; }
+  #quarto-content { display: block !important; }
+  #quarto-document-content, main.content { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 0 !important; grid-column: 1 / -1 !important; }
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  figure, img, table, .key-stats, .callout { break-inside: avoid; }
+  h2, h3 { break-after: avoid; }
+  h2 { break-before: page; }
+  #project-summary h2, .hero h1 { break-before: auto; }
+}
