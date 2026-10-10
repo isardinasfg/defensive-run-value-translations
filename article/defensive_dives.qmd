@@ -1308,6 +1308,5 @@ them would change rank, so that kind of improvement doesn't show up here.
 
 ### Code and Queries
 
-The code and SQL behind this article are in a private GitHub repository:
+GitHub repository:
 [isardinasfg/defensive-run-value-translations](https://github.com/isardinasfg/defensive-run-value-translations).
-Ask Inaki Sardina for access.
